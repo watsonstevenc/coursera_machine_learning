@@ -1,0 +1,148 @@
+---
+title: "Activity Projections"
+author: "Steven Watson"
+date: "Saturday, July 18, 2015"
+output: html_document
+---
+
+#Introduction  
+The goal of this paper is to build a model using training data to predict how "well" someone performed a particular task. 
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. It is used for the Coursera Machine Learning Course Project.
+
+#Data Gathering
+We will assume the data is cut into training and testing csv files on your root directory, and we will pull it into R.
+
+```{r}
+set.seed(100) #setting my random seed
+require(caret) #loading the caret package
+require(ggplot2) #loading the ggplot2 packages
+traindata <- read.csv("~/pml-training.csv") #pulling in train data
+testdata <- read.csv("~/pml-testing.csv") #pulling in test data
+dim(traindata) #looking at train size
+dim(testdata) #looking at test size
+unique(traindata$classe) #looking at class types
+```
+
+#Data Analysis
+The first thing we notice is there is a lot of data here, about 20k records and 160 variables. We are supposed to sift through all of this to make predictions on 20 records for one of 5 different classes (A,B,C,D,E). Since we have so little "test" data, we are actually going to subset the "train" data into a train set with 75% of the data and a test set with the remaining 25%. We will withhold the testing data as a validation set. (Note, I've commented a few lines of analysis out for brevity.)
+
+```{r}
+inTrain<-createDataPartition(y=traindata$classe,p=0.75,list=FALSE)
+training <- traindata[ inTrain,]
+testing <- traindata[-inTrain,]
+validating <- testdata
+dim(training) #looking at train size
+dim(testing) #looking at test size
+dim(validating) #looking at validating size
+#str(training$classe) #check the structure
+#summary(training) #summarizing the data
+qplot(roll_belt, pitch_belt,data=training, facets=.~classe, colour=user_name) #plotting data
+```
+
+#Cleaning data
+Before we can start predicting anything, we should ensure our data is clean and tidy. First, we start by removing any variables that have near zero variance, as they have little impact on the model. We will also remove summary data, like min, max, var, sd, and avg using grep
+
+```{r}
+nvs<-nearZeroVar(training,saveMetrics=TRUE) #find the near zero var fields
+training<- training[, row.names(nvs[ nvs$nzv == FALSE, ]) ] #trim for training
+testing<- testing[, row.names(nvs[ nvs$nzv == FALSE, ]) ] #trim for testing
+validating   <- validating[, na.omit( match(row.names(nvs[ nvs$nzv == FALSE, ]), names(validating)) )] #trim for validation
+
+training     <- training[, -grep( "^min_|^max_|^var_|^stddev_|^amplitude_|^avg_", names(training) ) ] #trim for training
+testing      <- testing[, -grep( "^min_|^max_|^var_|^stddev_|^amplitude_|^avg_", names(testing) ) ] #trim for testing
+validating   <- validating[, -grep( "^min_|^max_|^var_|^stddev_|^amplitude_|^avg_", names(validating) ) ] #trim for validating
+```
+
+next we turn the user name factor variable into indicator variables
+
+```{r}
+usrTrain    <- dummyVars( classe ~ user_name, data = training ) #dummy var for training
+training     <- cbind( predict(usrTrain, newdata=training), training ) #binding the dummy var
+training     <- training[, !(names(training) == "user_name")] #removing user name
+
+usrTest     <- dummyVars( classe ~ user_name, data = testing ) #dummy var for testing
+testing      <- cbind( predict(usrTest, newdata=testing), testing ) #binding the dummy var
+testing      <- testing[, !(names(testing) == "user_name")] #removing user name
+
+usrValidate  <- dummyVars( X ~ user_name, data = validating ) #dummy var for validating
+validating   <- cbind( predict(usrValidate, newdata=validating), validating ) #binding the dummy var
+validating   <- validating[, !(names(validating) == "user_name")] #removing user name
+```
+
+Next we rearrange the data to make it easier to use
+
+```{r}
+training     <- cbind( training[, c(64, 7:11)], training[, c(1:6, 12:63)] ) #bring classe to the front
+testing      <- cbind( testing[, c(64, 7:11)], testing[, c(1:6, 12:63)] ) #bring classe to the front
+validating   <- cbind( validating[, c(7:11)], validating[, c(1:6, 12:63)] ) #bring classe to the front
+```
+
+
+Next we center and scale the non factor variables. Note that the scaling we do for the train set we must apply on all three sets
+```{r}
+stdvObj <- preProcess( training[, c(7:64)], method = c("center", "scale") ) #center and scale the train set
+training     <- cbind(  training[, c(1:6)], predict( stdvObj, training[, c(7:64)] )  ) #apply to training set
+testing    <- cbind(  testing[, c(1:6)], predict( stdvObj, testing[, c(7:64)] )  ) #apply to testing set
+validating   <- cbind(  validating[, c(1:5)], predict( stdvObj, validating[, c(6:63)] )  ) #apply to validation set
+```
+
+Next, we impute any missing pieces of data in the non factor fields. Again, we use the train set prediction on all 3 sets.
+```{r}
+impObj <- preProcess( training[, c(7:64)], method = c("knnImpute") ) #imputing missing values
+training     <- cbind(  training[, c(1:6)], predict( impObj, training[, c(7:64)] )  ) #bringing in missing values
+testing      <- cbind(  testing[, c(1:6)], predict( impObj, testing[, c(7:64)] )  )
+validating   <- cbind(  validating[, c(1:5)], predict( impObj, validating[, c(6:63)] )  )
+```
+
+
+Finally, we remove the time stamps and row numbers
+
+```{r}
+training     <- cbind( list( "classe" = training[, 1] ), training[, c(6:64)] ) #removing time stamps
+testing    <- cbind( list( "classe" = testing[, 1] ), testing[, c(6:64)] )
+validating   <- validating[, c(5:63)]
+sum(is.na(training)) #checking for NAs
+```
+
+#Data Modeling
+
+We end up with a model with 60 variables (including the classe predictor) that is centered with no NAs. Let's try our first model with a decision tree
+
+```{r}
+modFit<-train(classe ~., data=training, method="rpart") #run a decision tree model
+modFit #view the model
+modFit$finalModel #view the final model
+require(rattle) #load the rattle package
+fancyRpartPlot(modFit$finalModel) #plot the deicision tree
+rpartPrediction<-predict(modFit,newdata=testing) #run the model on the test set
+confusionMatrix(rpartPrediction,testing$classe) #score the model
+```
+
+Well, better than nothing, but only 51% accurate. But we know decision trees aren't the greatest. Let's try something more advanced, like random forests.
+
+```{r}
+rfFit<-train(classe ~., data=training, method="rf",prox=TRUE, trControl = trainControl(method = "cv", number = 2))
+rfFit #view the model
+rfFit$finalModel #view the final model
+rfPrediction<-predict(rfFit,newdata=testing) #run the model on the test set
+confusionMatrix(rfPrediction,testing$classe) #score the model
+```
+
+Significantly better! The random forest model takes longer, but produces a near perfect results of 99.8% accuracy.
+
+#Cross Validation and Sample Error
+
+It is not necesary to do any extra cross validation because the train function does this internally with the "cv" trainControl method.
+
+Based on the misclassifcation rate on the test data using the prediction model (with the confusionMatrix function), we would expect the error to be about 0.2%, or about 1 in 500 observations wrong.
+
+
+#Validation Data
+Finally, we need to submit the validation data. This is done externally through the coursera site, but the correct answers are given below
+
+```{r}
+rfValidating<-predict(rfFit,newdata=validating)
+rfValidating
+submission<-as.character(rfValidating)
+```
+
